@@ -16,6 +16,10 @@
 
 #include <iostream>
 
+#include <cmath>
+#include <random>
+
+#include "bedrock/world/attribute/attribute_instance.h"
 #include "bedrock/entity/components/damage_sensor_component.h"
 #include "bedrock/entity/components/no_action_time_component.h"
 #include "endstone/actor/actor.h"
@@ -30,10 +34,63 @@
 
 void Mob::knockback(Actor *source, float damage, float dx, float dz, const KnockbackParameters &parameters)
 {
+    // If dx and dz are zero and a source is provided, compute the directional vector
+    if (dx == 0.0f && dz == 0.0f && source != nullptr) {
+        dx = getPosition().x - source->getPosition().x;
+        dz = getPosition().z - source->getPosition().z;
+    }
+
+    float f = std::sqrt(dx * dx + dz * dz);
+    if (f <= 0.0f) {
+        return;
+    }
+
+    // Check Knockback Resistance (as in PocketMine-MP / axolotl-pm Living::knockBack)
+    float knockback_resistance = 0.0f;
+    try {
+        if (const auto *attr = getAttribute("minecraft:knockback_resistance")) {
+            knockback_resistance = attr->getCurrentValue();
+        }
+    }
+    catch (...) {
+        knockback_resistance = 0.0f;
+    }
+
+    // mt_rand() / mt_getrandmax() > knockbackResistanceAttr->getValue()
+    static thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+    if (knockback_resistance > 0.0f && dis(gen) <= knockback_resistance) {
+        return;
+    }
+
     const auto before = getPosDelta();
-    ENDSTONE_HOOK_CALL_ORIGINAL(&Mob::knockback, this, source, damage, dx, dz, parameters);
-    const auto after = getPosDelta();
-    auto diff = after - before;
+
+    // Default values from axolotl-pm / PocketMine-MP:
+    // Living::DEFAULT_KNOCKBACK_FORCE = 0.4
+    // Living::DEFAULT_KNOCKBACK_VERTICAL_LIMIT = 0.4
+    constexpr float default_knockback_force = 0.4f;
+    constexpr float default_vertical_limit = 0.4f;
+
+    float force = default_knockback_force;
+    float vertical_limit = default_vertical_limit;
+
+    // In axolotl-pm, knockback enchantment adds level * 0.5f to force.
+    // In Bedrock, parameters.extra_knockback_power carries enchantment / sprint bonus.
+    if (parameters.extra_knockback_power > 0.0f) {
+        force += parameters.extra_knockback_power * 0.5f;
+    }
+
+    float inv_f = 1.0f / f;
+    float motion_x = (before.x / 2.0f) + (dx * inv_f * force);
+    float motion_y = (before.y / 2.0f) + force;
+    float motion_z = (before.z / 2.0f) + (dz * inv_f * force);
+
+    if (motion_y > vertical_limit) {
+        motion_y = vertical_limit;
+    }
+
+    Vec3 new_motion{motion_x, motion_y, motion_z};
+    Vec3 diff = new_motion - before;
 
     const auto &server = endstone::core::EndstoneServer::getInstance();
     endstone::ActorKnockbackEvent e{getEndstoneActor<endstone::core::EndstoneMob>(),
